@@ -214,6 +214,8 @@ def main():
         time.sleep(0.3)
         password_input.press("Tab")
         time.sleep(0.3)
+        password_input.press("Tab")
+        time.sleep(0.3)
         page.keyboard.press("Space")
         time.sleep(1.5)
         # 步骤 2：严格等待 Turnstile 勾选并获取到 Token
