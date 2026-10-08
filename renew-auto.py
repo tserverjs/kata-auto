@@ -209,6 +209,13 @@ def main():
         password_input.fill(ACCOUNT_PASS)
         time.sleep(0.5)
 
+        print("⌨️ 尝试 Tab + Space 聚焦并勾选 Turnstile...")
+        password_input.press("Tab")
+        time.sleep(0.3)
+        password_input.press("Tab")
+        time.sleep(0.3)
+        page.keyboard.press("Space")
+        time.sleep(1.5)
         # 步骤 2：严格等待 Turnstile 勾选并获取到 Token
         turnstile_ok = ensure_turnstile_passed(page, timeout=35)
         shot(page, "02_turnstile_check")
