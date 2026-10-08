@@ -55,7 +55,7 @@ jobs:
           fi
           echo "✅ 代理就绪，出口 IP: ${EXIT_IP}"
 
-      - name: 🔍 运行 Lunafy 监控续期脚本（xvfb + headed 模式）
+      - name: 🔍 运行 katabump 监控续期脚本（xvfb + headed 模式）
         env:
           KATABUMP_USER: ${{ secrets.KATABUMP_USER }}
           KATABUMP_PASS: ${{ secrets.KATABUMP_PASS }}
@@ -69,7 +69,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: lunafy-screenshots-${{ github.run_id }}
+          name: katabump-screenshots-${{ github.run_id }}
           path: "screenshots/*.png"
           retention-days: 5
 
@@ -77,6 +77,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: lunafy-video-${{ github.run_id }}
+          name: katabump-video-${{ github.run_id }}
           path: "videos/*.webm"
           retention-days: 7
