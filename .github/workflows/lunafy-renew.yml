@@ -56,7 +56,8 @@ jobs:
 
       - name: 🔍 运行 Lunafy 监控续期脚本（xvfb + headed 模式）
         env:
-          LUNAFY_COOKIES: ${{ secrets.LUNAFY_COOKIES }}
+          KATABUMP_USER: ${{ secrets.KATABUMP_USER }}
+          KATABUMP_PASS: ${{ secrets.KATABUMP_PASS }}
           WECHAT_WEBHOOK_KEY: ${{ secrets.WECHAT_WEBHOOK_KEY }}
           CLOAKBROWSER_LICENSE_KEY: ${{ secrets.CLOAKBROWSER_LICENSE_KEY }}  # 可选
           HEADLESS: "false"     # headed 模式 Turnstile 通过率最高，由 xvfb 提供虚拟显示
