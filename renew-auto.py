@@ -215,7 +215,7 @@ def main():
         page.keyboard.press("Tab")
         time.sleep(0.3)
         page.keyboard.press("Space")
-        time.sleep(1.5)
+        time.sleep(5.0)
         # 步骤 2：严格等待 Turnstile 勾选并获取到 Token
         turnstile_ok = ensure_turnstile_passed(page, timeout=35)
         shot(page, "02_turnstile_check")
