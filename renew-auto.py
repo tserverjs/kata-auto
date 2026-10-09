@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Katabump 自动登录与服务器续期监控脚本（CloakBrowser 版）
-- 自动登录 Katabump Dashboard
+Katabump 自动登录与服务器续期监控脚本（CloakBrowser 全局特效版）
+- 修复：使用 page.add_init_script 实现跨页面持久化红色涟漪点击特效
 - 自动处理 Cloudflare Turnstile 人机验证
 - 自动进入 "Your servers" 列表并点击 "See" 进入服务器详情页
-- 自动点击 "Renew" 按钮完成服务器续期
+- 自动点击 "Renew" 按钮（含 Modal 弹窗处理）完成服务器续期
 - 自动提取 "Service information" 卡片内容并推送企业微信机器人
-- 全全程红色涟漪点击高亮与 WebM 视频录制
 """
 import os
-import re
 import time
 import glob
 from datetime import datetime
@@ -35,15 +33,14 @@ os.makedirs(VIDEO_DIR, exist_ok=True)
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
 
-# ==================== 点击高亮特效 ====================
-def show_click_ripple(page, x: float, y: float):
-    """在坐标 (x, y) 显示红色涟漪视觉特效"""
-    js_code = """
-    (pos) => {
+# ==================== 持久化点击高亮特效 ====================
+INIT_RIPPLE_JS = """
+window.showClickRipple = function(x, y) {
+    try {
         const circle = document.createElement('div');
         circle.style.position = 'fixed';
-        circle.style.left = (pos.x - 15) + 'px';
-        circle.style.top = (pos.y - 15) + 'px';
+        circle.style.left = (x - 15) + 'px';
+        circle.style.top = (y - 15) + 'px';
         circle.style.width = '30px';
         circle.style.height = '30px';
         circle.style.borderRadius = '50%';
@@ -68,10 +65,17 @@ def show_click_ripple(page, x: float, y: float):
                 circle.parentNode.removeChild(circle);
             }
         }, 450);
+    } catch (e) {
+        console.error('Ripple error:', e);
     }
-    """
+};
+"""
+
+
+def trigger_ripple(page, x: float, y: float):
+    """调用页面全局绑定的 showClickRipple 函数"""
     try:
-        page.evaluate(js_code, {"x": x, "y": y})
+        page.evaluate(f"window.showClickRipple && window.showClickRipple({x}, {y})")
     except Exception:
         pass
 
@@ -80,7 +84,7 @@ def visual_click(page, x: float, y: float):
     """带红色涟漪特效的模拟点击"""
     page.mouse.move(x, y, steps=12)
     time.sleep(0.1)
-    show_click_ripple(page, x, y)
+    trigger_ripple(page, x, y)
     time.sleep(0.15)
     page.mouse.down()
     time.sleep(0.08)
@@ -158,49 +162,119 @@ def ensure_turnstile_passed(page, timeout=40) -> bool:
 
         time.sleep(1)
 
-    print("  ⚠️ Turnstile 验证超时或未生成 Token（可能无需验证）")
+    print("  ⚠️ Turnstile 验证超时或未生成 Token")
     return False
 
 
-# ==================== 信息解析函数 ====================
-def extract_service_info(page) -> str:
-    """从 Service information 卡片中提取信息文本"""
-    try:
-        # 定位 Service information 卡片及其内部所有文本
-        card_locator = page.locator('*:has-text("Service information")').last
-        if card_locator.is_visible(timeout=5000):
-            card_text = card_locator.inner_text()
-            print(f"📋 抓取到的卡片原文:\n{card_text}")
-            return card_text
-    except Exception as e:
-        print(f"⚠️ 定位 Service information 卡片失败: {e}")
+# ==================== 智能定位与点击 Renew 按钮 ====================
+def locate_and_click_renew(page) -> bool:
+    """多策略寻找并点击 Renew 按钮（处理异步加载与 Confirm 弹窗）"""
+    print("🔍 正在检索 Renew 按钮...")
+    
+    renew_selectors = [
+        'button:has-text("Renew")',
+        'a:has-text("Renew")',
+        '[aria-label*="Renew" i]',
+        'button:has-text("续期")',
+        'a:has-text("续期")',
+        'button.btn-primary:has-text("Renew")',
+        'a.btn:has-text("Renew")',
+        'button[wire\\:click*="renew"]',
+        'a[href*="renew"]'
+    ]
 
-    # 降级备用逻辑：直接全局获取整页 body 文本
+    deadline = time.time() + 12
+    renew_target = None
+
+    while time.time() < deadline:
+        for sel in renew_selectors:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() > 0 and loc.is_visible():
+                    renew_target = loc
+                    print(f"  ✅ 成功匹配到 Renew 选择器: {sel}")
+                    break
+            except Exception:
+                pass
+        
+        if renew_target:
+            break
+        time.sleep(1)
+
+    if not renew_target:
+        print("  ⚠️ 页面中未监听到可见的 Renew 按钮")
+        return False
+
+    try:
+        box = renew_target.bounding_box()
+        if box:
+            print(f"  🎯 点击 Renew 按钮，坐标: ({box['x']:.1f}, {box['y']:.1f})")
+            visual_click(page, box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        else:
+            renew_target.click()
+        
+        time.sleep(1.5)
+
+        # 检查二次确认 Modal
+        confirm_selectors = [
+            'div[role="dialog"] button:has-text("Confirm")',
+            'div[role="dialog"] button:has-text("Yes")',
+            'div[role="dialog"] button:has-text("Renew")',
+            '.modal-footer button:has-text("Confirm")',
+            'button:has-text("Confirm")'
+        ]
+        for c_sel in confirm_selectors:
+            try:
+                c_btn = page.locator(c_sel).first
+                if c_btn.is_visible(timeout=1000):
+                    c_box = c_btn.bounding_box()
+                    print(f"  👆 触发 Modal 确认按钮点击: {c_sel}")
+                    if c_box:
+                        visual_click(page, c_box["x"] + c_box["width"] / 2, c_box["y"] + c_box["height"] / 2)
+                    else:
+                        c_btn.click()
+                    break
+            except Exception:
+                pass
+
+        return True
+
+    except Exception as e:
+        print(f"  ❌ 点击 Renew 过程中发生错误: {e}")
+        return False
+
+
+# ==================== 信息解析与格式化 ====================
+def extract_service_info(page) -> str:
+    """提取 Service information 卡片信息"""
+    try:
+        card_locator = page.locator('*:has-text("Service information")').last
+        if card_locator.is_visible(timeout=3000):
+            card_text = card_locator.inner_text()
+            return card_text
+    except Exception:
+        pass
     return body_text(page)
 
 
 def format_wechat_msg(raw_info: str, renew_status: str, now: str) -> str:
-    """将抓取的服务信息格式化为企微推送格式"""
+    """格式化企业微信消息"""
     msg_lines = [
         "━━━━━━━━━━━━━━━━━━━━",
-        f"🤖 Katabump 服务器自动续期通知",
+        "🤖 Katabump 服务器自动续期通知",
         f"🔄 续期状态：{renew_status}",
         "━━━━━━━━━━━━━━━━━━━━",
         "📊 【Service Information 详情】",
     ]
 
-    # 清理不必要的换行并追加信息主体
     cleaned_lines = [line.strip() for line in raw_info.splitlines() if line.strip()]
-    
-    # 简单过滤重复标题
-    for line in cleaned_lines[:15]:  # 保留关键信息行
+    for line in cleaned_lines[:15]:
         msg_lines.append(f"• {line}")
 
     msg_lines.extend([
         "━━━━━━━━━━━━━━━━━━━━",
         f"⏰ 执行时间：{now}"
     ])
-
     return "\n".join(msg_lines)
 
 
@@ -236,16 +310,19 @@ def main():
             locale="zh-CN",
             extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
         )
+        
+        # 🔑 【关键步骤】全局绑定涟漪函数：确保无论跳转/刷新到哪个页面，涟漪函数均有效
+        context.add_init_script(INIT_RIPPLE_JS)
+
         page = context.new_page()
 
-        # ---------------- 1. 打开登录页 ----------------
+        # ---------------- 1. 打开并登录 ----------------
         print(f"🌐 打开登录页: {TARGET_URL}")
         page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(3000)
         shot(page, "01_login_page")
 
         # 填写账号密码
-        print("🔍 填写账号与密码...")
         email_input = page.locator("#email")
         email_input.wait_for(state="visible", timeout=10000)
         box_email = email_input.bounding_box()
@@ -261,7 +338,7 @@ def main():
         password_input.fill(ACCOUNT_PASS)
         time.sleep(0.5)
 
-        # 键盘快捷操作尝试勾选 Turnstile
+        # Tab + Space 快捷勾选 Turnstile
         print("⌨️ 尝试 Tab + Space 聚焦并勾选 Turnstile...")
         password_input.press("Tab")
         time.sleep(0.3)
@@ -270,17 +347,13 @@ def main():
         page.keyboard.press("Space")
         time.sleep(3.0)
 
-        # 确保 Turnstile 验证通过
         turnstile_ok = ensure_turnstile_passed(page, timeout=35)
         shot(page, "02_turnstile_check")
 
         if not turnstile_ok:
-            print("⚠️ 警告：Turnstile 尚未通过，暂停提交以防登录失败。")
             send_wechat(f"❌ Katabump 登录失败\n\nCloudflare 验证未通过。\n⏰ {now}")
             return
 
-        # 点击 Login 提交
-        print("👆 准备点击登录按钮...")
         submit_btn = page.locator('button[type="submit"], input[type="submit"], button:has-text("Login"), button:has-text("Log in")').first
         if submit_btn.is_visible(timeout=3000):
             box_submit = submit_btn.bounding_box()
@@ -295,56 +368,42 @@ def main():
         shot(page, "03_after_login")
 
         if "login" in page.url:
-            print("❌ 仍停留在登录页，登录失败。")
-            send_wechat(f"❌ Katabump 登录失败\n\n未能成功跳转 Dashboard。\n⏰ {now}")
+            send_wechat(f"❌ Katabump 登录失败\n\n未能跳转 Dashboard。\n⏰ {now}")
             return
 
-        print("🎉 登录成功，已跳转至后台。")
-
-        # ---------------- 2. 进入服务器详情页 (Your servers -> See) ----------------
-        print("🔍 查找 Your servers 列表中的 'See' 按钮...")
+        # ---------------- 2. 点击 See 进入详情页 ----------------
+        print("🔍 查找 Your servers 中的 'See' 按钮...")
         see_btn = page.locator('a:has-text("See"), button:has-text("See")').first
         see_btn.wait_for(state="visible", timeout=15000)
-        
+
         box_see = see_btn.bounding_box()
         if box_see:
             visual_click(page, box_see["x"] + box_see["width"] / 2, box_see["y"] + box_see["height"] / 2)
         else:
             see_btn.click()
 
+        page.wait_for_load_state("domcontentloaded")
         page.wait_for_timeout(4000)
         shot(page, "04_server_detail_page")
 
-        # ---------------- 3. 点击 Renew 续期按钮 ----------------
-        print("🔄 在详情页查找 'Renew' 按钮...")
-        renew_btn = page.locator('button:has-text("Renew"), a:has-text("Renew")').first
-        renew_status = "未触发/无需续期"
-
-        if renew_btn.is_visible(timeout=5000):
-            box_renew = renew_btn.bounding_box()
-            if box_renew:
-                print("  🎯 找到 Renew 按钮，触发点击...")
-                visual_click(page, box_renew["x"] + box_renew["width"] / 2, box_renew["y"] + box_renew["height"] / 2)
-            else:
-                renew_btn.click()
-
+        # ---------------- 3. 点击 Renew 按钮 ----------------
+        renew_clicked = locate_and_click_renew(page)
+        
+        if renew_clicked:
             time.sleep(2.0)
-            # 点击 Renew 后若弹出 Turnstile 质询，自动处理
-            ensure_turnstile_passed(page, timeout=30)
+            ensure_turnstile_passed(page, timeout=25)
             page.wait_for_timeout(4000)
             shot(page, "05_after_renew")
-            renew_status = "✅ 续期操作已点击完成"
+            renew_status = "✅ 续期操作已成功点击并提交"
         else:
-            print("  ℹ️ 未发现 Renew 按钮（可能服务器状态良好，无需续期）。")
-            renew_status = "ℹ️ 无需续期/Renew按钮未出现"
+            shot(page, "05_no_renew_found")
+            renew_status = "ℹ️ 未发现 Renew 按钮（状态正常或未到续期时间）"
 
-        # ---------------- 4. 提取 Service information 并发送企微通知 ----------------
-        print("📋 正在读取 Service information 卡片信息...")
+        # ---------------- 4. 抓取卡片信息并发送通知 ----------------
+        print("📋 读取 Service information 信息...")
         service_info = extract_service_info(page)
-        
+
         wechat_msg = format_wechat_msg(service_info, renew_status, now)
-        print("📤 准备发送企微消息:\n" + wechat_msg)
-        
         send_wechat(wechat_msg)
         print("✅ 监控全流程顺利完成！")
 
