@@ -1,9 +1,9 @@
-name: 🖥️ Lunafy Turnstile 自动续期
+name: 🖥️ katabump Turnstile 自动续期（CloakBrowser）
 
 on:
   schedule:
-    - cron: '0 2 * * *'   
-  workflow_dispatch:         # 支持手动触发
+    - cron: '0 2 * * *'
+  workflow_dispatch:
 
 jobs:
   monitor:
@@ -16,17 +16,21 @@ jobs:
       - name: 🐍 Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'   # 避免 3.13+ 的 sync API 兼容问题
 
-      - name: 📦 安装系统依赖（Chrome + xvfb）
+      - name: 📦 安装系统依赖（xvfb + Chromium 运行库）
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb google-chrome-stable
+          sudo apt-get install -y fonts-wqy-zenhei fonts-wqy-microhei
+          sudo apt-get install -y xvfb libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
+            libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 \
+            libgbm1 libasound2t64 libpango-1.0-0 libcairo2 libatspi2.0-0
 
-      - name: 📦 安装 Python 依赖
+      - name: 📦 安装 Python 依赖 + 预下载 CloakBrowser 二进制
         run: |
-          pip install seleniumbase requests
-          seleniumbase install chromedriver latest
+          pip install cloakbrowser requests
+          python -m cloakbrowser install
+          python -m playwright install ffmpeg
 
       - name: 🌐 启动 GOST 代理隧道
         env:
@@ -51,18 +55,28 @@ jobs:
           fi
           echo "✅ 代理就绪，出口 IP: ${EXIT_IP}"
 
-      - name: 🔍 运行 Lunafy 监控续期脚本
+      - name: 🔍 运行 katabump 监控续期脚本（xvfb + headed 模式）
         env:
-          LUNAFY_COOKIES: ${{ secrets.LUNAFY_COOKIES }}
+          KATABUMP_USER: ${{ secrets.KATABUMP_USER }}
+          KATABUMP_PASS: ${{ secrets.KATABUMP_PASS }}
           WECHAT_WEBHOOK_KEY: ${{ secrets.WECHAT_WEBHOOK_KEY }}
+          CLOAKBROWSER_LICENSE_KEY: ${{ secrets.CLOAKBROWSER_LICENSE_KEY }}  # 可选
+          HEADLESS: "false"     # headed 模式 Turnstile 通过率最高，由 xvfb 提供虚拟显示
         run: |
-          # 使用 xvfb-run 提供虚拟显示，供 UC GUI 点击验证码
           xvfb-run -a --server-args="-screen 0 1920x1080x24" python renew-auto.py
 
       - name: 📷 上传调试截图
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: lunafy-screenshots-${{ github.run_id }}
-          path: "*.png"
+          name: katabump-screenshots-${{ github.run_id }}
+          path: "screenshots/*.png"
           retention-days: 5
+
+      - name: 🎬 上传操作录屏
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: katabump-video-${{ github.run_id }}
+          path: "videos/*.webm"
+          retention-days: 7
