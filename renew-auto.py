@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Katabump 自动登录与服务器续期监控脚本（精准 Modal 触发按钮版）
-- 针对精准 Renew 元素定位: button[data-bs-target="#renew-modal"]
-- 自动处理点击后弹出的 #renew-modal 确认框及 Turnstile 验证
-- 跨页面持久化红色涟漪点击特效与 WebM 视频录制
+Katabump 自动登录与服务器续期监控脚本（Canvas 高亮与提示捕获完整版）
+- 使用 Canvas 全局图层绘制红色圆圈波纹特效（解决录屏与跨页点击不显示问题）
+- 精准定位 Renew 模态框触发按钮与确认按钮
+- 自动捕获未到续期时间提示 (.alert-danger) 并同步至企微通知
+- 精准提取 Service information 卡片详情（Expiry, Renew period, Price 等）
 """
 import os
+import re
 import time
 import glob
 from datetime import datetime
@@ -31,50 +33,61 @@ os.makedirs(VIDEO_DIR, exist_ok=True)
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
 
-# ==================== 点击高亮特效 ====================
-def trigger_ripple(page, x: float, y: float):
-    """强制在坐标 (x, y) 渲染最顶层红色涟漪动画"""
-    js_code = """
-    ([x, y]) => {
-        try {
-            const circle = document.createElement('div');
-            circle.style.cssText = `
-                position: fixed !important;
-                left: ${x - 15}px !important;
-                top: ${y - 15}px !important;
-                width: 30px !important;
-                height: 30px !important;
-                border-radius: 50% !important;
-                background-color: rgba(255, 0, 0, 0.7) !important;
-                border: 2px solid red !important;
-                box-shadow: 0 0 12px red !important;
-                pointer-events: none !important;
-                z-index: 2147483647 !important;
-                transition: transform 0.4s ease-out, opacity 0.4s ease-out !important;
-                transform: scale(0.5) !important;
-                opacity: 1 !important;
-            `;
-            document.body.appendChild(circle);
-            requestAnimationFrame(() => {
-                circle.style.transform = 'scale(2.5)';
-                circle.style.opacity = '0';
-            });
-            setTimeout(() => {
-                if (circle.parentNode) circle.parentNode.removeChild(circle);
-            }, 450);
-        } catch (e) {
-            console.error(e);
+# ==================== Canvas 全局最顶层点击高亮特效 ====================
+INIT_CANVAS_RIPPLE_JS = """
+window.drawClickRipple = function(x, y) {
+    try {
+        let canvas = document.getElementById('global-click-ripple-canvas');
+        if (!canvas) {
+            canvas = document.createElement('canvas');
+            canvas.id = 'global-click-ripple-canvas';
+            canvas.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;pointer-events:none;z-index:2147483647;';
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            document.documentElement.appendChild(canvas);
         }
+        const ctx = canvas.getContext('2d');
+        let radius = 10;
+        let maxRadius = 35;
+        let opacity = 1.0;
+
+        function animate() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (opacity <= 0) return;
+
+            ctx.beginPath();
+            ctx.arc(x, y, radius, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(255, 0, 0, ${opacity * 0.5})`;
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.arc(x, y, radius + 2, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(255, 0, 0, ${opacity})`;
+            ctx.lineWidth = 3;
+            ctx.stroke();
+
+            radius += 1.5;
+            opacity -= 0.04;
+            requestAnimationFrame(animate);
+        }
+        animate();
+    } catch(e) {
+        console.error('Ripple Canvas Error:', e);
     }
-    """
+};
+"""
+
+
+def trigger_ripple(page, x: float, y: float):
+    """通过 Canvas 绘制全局红色透明圆圈与扩散动画"""
     try:
-        page.evaluate(js_code, [x, y])
+        page.evaluate(f"window.drawClickRipple && window.drawClickRipple({x}, {y})")
     except Exception:
         pass
 
 
 def visual_click_locator(page, locator) -> bool:
-    """针对 Locator 对象的安全高亮点击"""
+    """带 Canvas 红色圆圈特效的模拟点击"""
     try:
         locator.scroll_into_view_if_needed(timeout=5000)
         time.sleep(0.3)
@@ -82,22 +95,21 @@ def visual_click_locator(page, locator) -> bool:
         if box and box["width"] > 0 and box["height"] > 0:
             x = box["x"] + box["width"] / 2
             y = box["y"] + box["height"] / 2
-            print(f"  🎯 触发红色涟漪坐标点击: ({x:.1f}, {y:.1f})，元素尺寸: {box['width']}x{box['height']}")
-            page.mouse.move(x, y, steps=12)
+            print(f"  🎯 触发红色圆圈高亮点击: ({x:.1f}, {y:.1f})")
+            page.mouse.move(x, y, steps=10)
             time.sleep(0.1)
             trigger_ripple(page, x, y)
-            time.sleep(0.2)
+            time.sleep(0.15)
             page.mouse.down()
             time.sleep(0.08)
             page.mouse.up()
             time.sleep(0.2)
             return True
         else:
-            print("  ⚠️ 坐标计算失败，使用 force=True 原生点击")
             locator.click(force=True)
             return True
     except Exception as e:
-        print(f"  ⚠️ 视觉点击异常，回退至原生 click: {e}")
+        print(f"  ⚠️ 坐标点击异常，降级原生点击: {e}")
         try:
             locator.click(force=True)
             return True
@@ -138,7 +150,7 @@ def send_wechat(content: str) -> bool:
 
 
 # ==================== Turnstile 验证处理 ====================
-def ensure_turnstile_passed(page, timeout=40) -> bool:
+def ensure_turnstile_passed(page, timeout=35) -> bool:
     print("🛡️ 开始进行 Turnstile 验证检查...")
     deadline = time.time() + timeout
     clicked = False
@@ -172,20 +184,22 @@ def ensure_turnstile_passed(page, timeout=40) -> bool:
     return False
 
 
-# ==================== 智能定位与点击 Renew 按钮 ====================
-def locate_and_click_renew(page) -> bool:
-    """精准定位你提供的按钮元素结构并处理后续弹窗"""
+# ==================== 定位与处理 Renew 逻辑 ====================
+def locate_and_click_renew(page) -> tuple[bool, str]:
+    """
+    点击 Renew 按钮与模态框确认，并捕获警示信息
+    返回值: (是否成功执行点击, 续期提示或结果文本)
+    """
     print("🔍 正在精准检索 Renew 按钮...")
 
-    # 优先强匹配你的准确 HTML 特征
     exact_selectors = [
-        'button[data-bs-target="#renew-modal"]',  # 最精准的选择器
+        'button[data-bs-target="#renew-modal"]',
         'button.btn-outline-primary:has-text("Renew")',
         'button[data-bs-toggle="modal"]:has-text("Renew")',
         'button:has-text("Renew")'
     ]
 
-    deadline = time.time() + 12
+    deadline = time.time() + 10
     renew_target = None
 
     while time.time() < deadline:
@@ -194,31 +208,33 @@ def locate_and_click_renew(page) -> bool:
                 loc = page.locator(sel).first
                 if loc.count() > 0 and loc.is_visible() and loc.is_enabled():
                     renew_target = loc
-                    print(f"  ✅ 成功定位到精确 Renew 按钮，选择器: {sel}")
+                    print(f"  ✅ 成功定位到 Renew 按钮，选择器: {sel}")
                     break
             except Exception:
                 pass
-
         if renew_target:
             break
         time.sleep(1)
 
     if not renew_target:
-        print("  ⚠️ 页面中未监听到可见的 Renew 按钮")
-        return False
+        print("  ⚠️ 未寻找到有效的 Renew 按钮")
+        return False, "ℹ️ 页面未发现 Renew 按钮"
 
     try:
-        # 打印匹配元素的外层 HTML 以供确认
-        outer_html = renew_target.evaluate("el => el.outerHTML")
-        print(f"  📋 匹配到的 HTML 结构: {outer_html}")
-
-        # 1. 点击 Renew 按钮触发 Modal 弹窗
+        # 1. 点击 Renew 打开模态框
         visual_click_locator(page, renew_target)
         time.sleep(2.0)
         shot(page, "05_renew_modal_opened")
 
-        # 2. 点击 Modal 弹窗内的最终确认提交按钮 (#renew-modal 内部)
-        print("🔍 寻找 #renew-modal 弹窗内部的确认按钮...")
+        # 2. 检查页面或模态框内是否已有 alert 提示（例如未到续期时间）
+        alert_loc = page.locator('.alert.alert-danger, .alert-warning')
+        if alert_loc.count() > 0 and alert_loc.first.is_visible(timeout=1000):
+            alert_text = alert_loc.first.inner_text().strip()
+            print(f"  ⚠️ 捕获到续期限制提示: {alert_text}")
+            return True, f"⚠️ 无法续期：{alert_text}"
+
+        # 3. 点击 Modal 弹窗内的提交确认按钮
+        print("🔍 寻找 #renew-modal 内部确认提交按钮...")
         modal_confirm_selectors = [
             '#renew-modal button[type="submit"]',
             '#renew-modal button:has-text("Renew")',
@@ -230,42 +246,74 @@ def locate_and_click_renew(page) -> bool:
             try:
                 m_btn = page.locator(m_sel).first
                 if m_btn.is_visible(timeout=2000):
-                    print(f"  👆 发现 Modal 确认按钮 [{m_sel}]，触发点击")
+                    print(f"  👆 点击 Modal 确认按钮: {m_sel}")
                     visual_click_locator(page, m_btn)
                     break
             except Exception:
                 pass
 
-        return True
+        time.sleep(2.0)
+
+        # 4. 再次检查提交后是否有 alert 提示
+        if alert_loc.count() > 0 and alert_loc.first.is_visible(timeout=1000):
+            alert_text = alert_loc.first.inner_text().strip()
+            print(f"  ⚠️ 提交后捕获到提示: {alert_text}")
+            return True, f"⚠️ 续期提示：{alert_text}"
+
+        return True, "✅ 续期请求已成功提交"
 
     except Exception as e:
-        print(f"  ❌ 点击 Renew 过程中发生错误: {e}")
-        return False
+        print(f"  ❌ 点击 Renew 流程发生错误: {e}")
+        return False, f"❌ 续期执行异常: {e}"
 
 
 # ==================== 信息解析与格式化 ====================
 def extract_service_info(page) -> str:
+    """提取 Service information 卡片中的详细文本"""
     try:
+        # 定位 Service information 卡片容器
         card_locator = page.locator('*:has-text("Service information")').last
         if card_locator.is_visible(timeout=3000):
-            return card_locator.inner_text()
+            text = card_locator.inner_text()
+            print("📋 抓取到的 Service Information 文本:\n" + text)
+            return text
     except Exception:
         pass
     return body_text(page)
 
 
 def format_wechat_msg(raw_info: str, renew_status: str, now: str) -> str:
+    """整理格式并拼装企微通知文本"""
     msg_lines = [
         "━━━━━━━━━━━━━━━━━━━━",
         "🤖 Katabump 服务器自动续期通知",
-        f"🔄 续期状态：{renew_status}",
+        f"📊 续期结果：{renew_status}",
         "━━━━━━━━━━━━━━━━━━━━",
-        "📊 【Service Information 详情】",
+        "🖥️ 【Service Information 详细信息】"
     ]
 
-    cleaned_lines = [line.strip() for line in raw_info.splitlines() if line.strip()]
-    for line in cleaned_lines[:15]:
-        msg_lines.append(f"• {line}")
+    # 按行切割并过滤空行
+    lines = [line.strip() for line in raw_info.splitlines() if line.strip()]
+    
+    # 提取常见关键属性
+    info_map = {}
+    key_terms = ["Renew period", "Expiry", "Auto renew", "Price", "Status", "Server Status"]
+    
+    for i, line in enumerate(lines):
+        for term in key_terms:
+            if term.lower() in line.lower():
+                # 如果下一行是对应的数值
+                val = lines[i+1] if (i + 1 < len(lines) and ":" not in lines[i+1]) else ""
+                info_map[term] = val if val else line
+
+    if info_map:
+        for k, v in info_map.items():
+            msg_lines.append(f"• {k}: {v}")
+    else:
+        # 降级备用：展示前 12 行有用数据
+        for line in lines[:12]:
+            if "Service information" not in line:
+                msg_lines.append(f"• {line}")
 
     msg_lines.extend([
         "━━━━━━━━━━━━━━━━━━━━",
@@ -307,6 +355,9 @@ def main():
             locale="zh-CN",
             extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
         )
+
+        # 🔑 全局注册 Canvas 动画绘制脚本
+        context.add_init_script(INIT_CANVAS_RIPPLE_JS)
 
         page = context.new_page()
 
@@ -368,19 +419,14 @@ def main():
         page.wait_for_timeout(5000)
         shot(page, "04_server_detail_page")
 
-        # ---------------- 3. 点击 Renew 按钮 ----------------
-        renew_clicked = locate_and_click_renew(page)
+        # ---------------- 3. 点击 Renew 按钮并捕获提示 ----------------
+        renew_clicked, renew_status = locate_and_click_renew(page)
 
         if renew_clicked:
             time.sleep(2.0)
-            # 点击后如果弹窗内有 Turnstile，再次等待通过
-            ensure_turnstile_passed(page, timeout=25)
-            page.wait_for_timeout(4000)
-            shot(page, "06_after_renew_submit")
-            renew_status = "✅ 续期操作已成功点击并提交"
-        else:
-            shot(page, "06_no_renew_found")
-            renew_status = "ℹ️ 未发现可点击的 Renew 按钮"
+            ensure_turnstile_passed(page, timeout=20)
+            page.wait_for_timeout(3000)
+            shot(page, "06_after_renew_result")
 
         # ---------------- 4. 抓取卡片信息并发送通知 ----------------
         print("📋 读取 Service information 信息...")
