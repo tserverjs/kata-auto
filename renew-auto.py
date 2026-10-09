@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Katabump 自动登录与服务器续期监控脚本（信息完整合并发送版）
-- Canvas 全局最顶层红色圆圈波纹高亮
-- 自动捕获 .alert-danger / .alert-warning 提示信息（如未到续期时间）
-- 显式等待并精准提取 Service information 的所有参数（Expiry, Renew period, Price 等）
-- 将续期状态、提示信息与服务器属性合并整合后发送至企业微信机器人
+Katabump 自动登录与服务器续期监控脚本（动态 Alert 捕获与北京时间版）
+- 修复：模态框提交后显式等待 .alert 动态生成，精准抓取未到续期时间提示
+- 完整提取 Service Information 参数（Expiry, Renew period, Auto renew, Price）
+- 消息统一格式化，包含续期状态、提示信息与服务器属性，发送至企微
+- 执行时间统一转换为北京时间 (UTC+8)
 """
 import os
-import re
 import time
 import glob
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 import requests
 from cloakbrowser import launch
@@ -31,6 +30,13 @@ SCREENSHOT_DIR = "./screenshots"
 
 os.makedirs(VIDEO_DIR, exist_ok=True)
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+
+
+# ==================== 获取北京时间 ====================
+def get_beijing_time_str() -> str:
+    """获取当前北京时间 (UTC+8) 格式化字符串"""
+    beijing_tz = timezone(timedelta(hours=8))
+    return datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ==================== Canvas 全局最顶层点击高亮特效 ====================
@@ -183,10 +189,37 @@ def ensure_turnstile_passed(page, timeout=35) -> bool:
     return False
 
 
+# ==================== 动态警示框抓取函数 ====================
+def fetch_alert_notice(page) -> str:
+    """全面扫描页面及模态框内动态生成的 .alert 节点"""
+    alert_selectors = [
+        '.alert.alert-danger',
+        '.alert.alert-warning',
+        '#renew-modal .alert',
+        '.alert',
+        'div[role="alert"]'
+    ]
+    for sel in alert_selectors:
+        try:
+            loc = page.locator(sel)
+            if loc.count() > 0:
+                for i in range(loc.count()):
+                    item = loc.nth(i)
+                    if item.is_visible():
+                        txt = item.inner_text().strip()
+                        if txt:
+                            # 过滤换行与多余空格
+                            clean_txt = " ".join([line.strip() for line in txt.splitlines() if line.strip()])
+                            return clean_txt
+        except Exception:
+            pass
+    return ""
+
+
 # ==================== 定位与处理 Renew 逻辑 ====================
 def locate_and_click_renew(page) -> tuple[bool, str, str]:
     """
-    点击 Renew 按钮与模态框确认，并捕获警示信息
+    点击 Renew 按钮与模态框确认，并显式等待捕获提交后生成的提示框
     返回值: (是否触发点击, 续期状态简述, 警示/提示详细文本)
     """
     print("🔍 正在精准检索 Renew 按钮...")
@@ -219,21 +252,13 @@ def locate_and_click_renew(page) -> tuple[bool, str, str]:
         print("  ⚠️ 未寻找到有效的 Renew 按钮")
         return False, "未找到 Renew 按钮", ""
 
-    notice_msg = ""
     try:
-        # 1. 点击 Renew 打开模态框
+        # 1. 点击外层 Renew 按钮打开模态框
         visual_click_locator(page, renew_target)
         time.sleep(2.0)
         shot(page, "05_renew_modal_opened")
 
-        # 2. 检查页面或模态框内是否有警示提示框 (.alert)
-        alert_loc = page.locator('.alert.alert-danger, .alert-warning, .alert-info')
-        if alert_loc.count() > 0 and alert_loc.first.is_visible(timeout=1500):
-            notice_msg = alert_loc.first.inner_text().strip()
-            print(f"  ⚠️ 捕获到续期限制/警示提示: {notice_msg}")
-            return True, "暂不可续期", notice_msg
-
-        # 3. 点击 Modal 弹窗内的提交确认按钮
+        # 2. 点击 Modal 弹窗内的提交确认按钮
         print("🔍 寻找 #renew-modal 内部确认提交按钮...")
         modal_confirm_selectors = [
             '#renew-modal button[type="submit"]',
@@ -245,20 +270,29 @@ def locate_and_click_renew(page) -> tuple[bool, str, str]:
         for m_sel in modal_confirm_selectors:
             try:
                 m_btn = page.locator(m_sel).first
-                if m_btn.is_visible(timeout=2000):
+                if m_btn.is_visible(timeout=1500):
                     print(f"  👆 点击 Modal 确认按钮: {m_sel}")
                     visual_click_locator(page, m_btn)
                     break
             except Exception:
                 pass
 
-        time.sleep(2.0)
+        # 3. 【关键修复】显式等待后端检测生成的 alert 提示元素出现
+        print("⏳ 正在等待点击后的 Alert 提示节点动态生成...")
+        try:
+            page.locator('.alert.alert-danger, .alert.alert-warning, div[role="alert"]').first.wait_for(state="visible", timeout=5000)
+            print("  ✅ 检测到 Alert 提示节点已生成！")
+        except Exception:
+            print("  ℹ️ 超时未监听到新的 Alert 节点（可能提交成功或提示样式不同）")
 
-        # 4. 再次检查提交后的警示框
-        if alert_loc.count() > 0 and alert_loc.first.is_visible(timeout=1500):
-            notice_msg = alert_loc.first.inner_text().strip()
-            print(f"  ⚠️ 提交后捕获到提示: {notice_msg}")
-            return True, "续期受到限制", notice_msg
+        time.sleep(1.5)
+
+        # 4. 提取生成的 alert 提示文案
+        notice_msg = fetch_alert_notice(page)
+        if notice_msg:
+            print(f"  ⚠️ 成功捕抓到续期提示信息: {notice_msg}")
+            status_desc = "⚠️ 续期受限/未到时间" if "can't renew" in notice_msg.lower() else "ℹ️ 续期提示"
+            return True, status_desc, notice_msg
 
         return True, "✅ 续期请求已提交", ""
 
@@ -320,14 +354,12 @@ def extract_service_info(page) -> dict:
     for i, line in enumerate(lines):
         for field in info.keys():
             if field.lower() in line.lower():
-                # 判断属性对应的值是在同一行 (如 "Expiry: 2026-10-12") 还是下一行
                 if ":" in line:
                     parts = line.split(":", 1)
                     if len(parts) > 1 and parts[1].strip():
                         info[field] = parts[1].strip()
                 elif i + 1 < len(lines):
                     next_line = lines[i+1]
-                    # 确保下一行不是另一个 key 属性名
                     if not any(k.lower() in next_line.lower() for k in info.keys()):
                         info[field] = next_line
 
@@ -335,7 +367,7 @@ def extract_service_info(page) -> dict:
     return info
 
 
-def format_wechat_msg(notice_msg: str, renew_status: str, service_data: dict, now: str) -> str:
+def format_wechat_msg(notice_msg: str, renew_status: str, service_data: dict, beijing_time_str: str) -> str:
     """组合警示文本与服务器属性，生成完整格式的企业微信推送"""
     msg_lines = [
         "━━━━━━━━━━━━━━━━━━━━",
@@ -343,11 +375,11 @@ def format_wechat_msg(notice_msg: str, renew_status: str, service_data: dict, no
         f"📊 续期操作结果：{renew_status}"
     ]
 
-    # 如果有警告/提示信息（如：未到续期时间提示），显示在醒目位置
+    # 如果存在警告/提示信息（如：未到续期时间），显示在醒目位置
     if notice_msg:
         msg_lines.extend([
             "━━━━━━━━━━━━━━━━━━━━",
-            f"⚠️ 提示/报错信息：\n{notice_msg}"
+            f"⚠️ 提示信息：\n{notice_msg}"
         ])
 
     msg_lines.extend([
@@ -358,7 +390,7 @@ def format_wechat_msg(notice_msg: str, renew_status: str, service_data: dict, no
         f"• Auto renew: {service_data.get('Auto renew', '未知')}",
         f"• Price: {service_data.get('Price', '未知')}",
         "━━━━━━━━━━━━━━━━━━━━",
-        f"⏰ 执行时间：{now}"
+        f"⏰ 执行时间（北京时间）：{beijing_time_str}"
     ])
 
     return "\n".join(msg_lines)
@@ -366,7 +398,7 @@ def format_wechat_msg(notice_msg: str, renew_status: str, service_data: dict, no
 
 # ==================== 主流程 ====================
 def main():
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    beijing_now = get_beijing_time_str()
 
     launch_kwargs = {
         "headless": HEADLESS,
@@ -434,7 +466,7 @@ def main():
         shot(page, "02_turnstile_check")
 
         if not turnstile_ok:
-            send_wechat(f"❌ Katabump 登录失败\n\nCloudflare 验证未通过。\n⏰ {now}")
+            send_wechat(f"❌ Katabump 登录失败\n\nCloudflare 验证未通过。\n⏰ 北京时间：{beijing_now}")
             return
 
         submit_btn = page.locator('button[type="submit"], input[type="submit"], button:has-text("Login"), button:has-text("Log in")').first
@@ -447,7 +479,7 @@ def main():
         shot(page, "03_after_login")
 
         if "login" in page.url:
-            send_wechat(f"❌ Katabump 登录失败\n\n未能跳转 Dashboard。\n⏰ {now}")
+            send_wechat(f"❌ Katabump 登录失败\n\n未能跳转 Dashboard。\n⏰ 北京时间：{beijing_now}")
             return
 
         # ---------------- 2. 点击 See 进入详情页 ----------------
@@ -473,14 +505,14 @@ def main():
         # ---------------- 4. 抓取 Service Info 并合并发送通知 ----------------
         service_data = extract_service_info(page)
 
-        wechat_msg = format_wechat_msg(notice_msg, renew_status, service_data, now)
+        wechat_msg = format_wechat_msg(notice_msg, renew_status, service_data, beijing_now)
         print("📤 即将发送合并后的完整推送文本:\n" + wechat_msg)
         send_wechat(wechat_msg)
         print("✅ 监控全流程顺利完成！")
 
     except Exception as e:
         print(f"❌ 运行发生异常: {e}")
-        send_wechat(f"❌ Katabump 脚本运行异常\n\n错误信息: {e}\n⏰ {now}")
+        send_wechat(f"❌ Katabump 脚本运行异常\n\n错误信息: {e}\n⏰ 北京时间：{beijing_now}")
 
     finally:
         if page:
