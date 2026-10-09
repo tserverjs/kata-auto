@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Katabump 自动登录与服务器续期监控脚本（CloakBrowser 全局特效版）
-- 修复：使用 page.add_init_script 实现跨页面持久化红色涟漪点击特效
-- 自动处理 Cloudflare Turnstile 人机验证
-- 自动进入 "Your servers" 列表并点击 "See" 进入服务器详情页
-- 自动点击 "Renew" 按钮（含 Modal 弹窗处理）完成服务器续期
-- 自动提取 "Service information" 卡片内容并推送企业微信机器人
+Katabump 自动登录与服务器续期监控脚本（CloakBrowser 视觉与滚动修复版）
+- 修复：强制将点击目标滚动至视口中央 (scroll_into_view_if_needed)
+- 修复：提升红色涟漪层级 (z-index: 2147483647)，解决特效不可见问题
+- 修复：延长 context 关闭前的等待时间，确保录屏视频完整不截断
 """
 import os
 import time
@@ -33,62 +31,81 @@ os.makedirs(VIDEO_DIR, exist_ok=True)
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
 
-# ==================== 持久化点击高亮特效 ====================
-INIT_RIPPLE_JS = """
-window.showClickRipple = function(x, y) {
-    try {
-        const circle = document.createElement('div');
-        circle.style.position = 'fixed';
-        circle.style.left = (x - 15) + 'px';
-        circle.style.top = (y - 15) + 'px';
-        circle.style.width = '30px';
-        circle.style.height = '30px';
-        circle.style.borderRadius = '50%';
-        circle.style.backgroundColor = 'rgba(255, 0, 0, 0.6)';
-        circle.style.border = '2px solid red';
-        circle.style.boxShadow = '0 0 10px red';
-        circle.style.pointerEvents = 'none';
-        circle.style.zIndex = '999999';
-        circle.style.transition = 'transform 0.4s ease-out, opacity 0.4s ease-out';
-        circle.style.transform = 'scale(0.5)';
-        circle.style.opacity = '1';
-
-        document.body.appendChild(circle);
-
-        requestAnimationFrame(() => {
-            circle.style.transform = 'scale(2.5)';
-            circle.style.opacity = '0';
-        });
-
-        setTimeout(() => {
-            if (circle.parentNode) {
-                circle.parentNode.removeChild(circle);
-            }
-        }, 450);
-    } catch (e) {
-        console.error('Ripple error:', e);
-    }
-};
-"""
-
-
+# ==================== 点击高亮特效（强注入版） ====================
 def trigger_ripple(page, x: float, y: float):
-    """调用页面全局绑定的 showClickRipple 函数"""
+    """强制在坐标 (x, y) 渲染最顶层红色涟漪动画"""
+    js_code = """
+    ([x, y]) => {
+        try {
+            const circle = document.createElement('div');
+            circle.style.cssText = `
+                position: fixed !important;
+                left: ${x - 15}px !important;
+                top: ${y - 15}px !important;
+                width: 30px !important;
+                height: 30px !important;
+                border-radius: 50% !important;
+                background-color: rgba(255, 0, 0, 0.7) !important;
+                border: 2px solid red !important;
+                box-shadow: 0 0 12px red !important;
+                pointer-events: none !important;
+                z-index: 2147483647 !important;
+                transition: transform 0.4s ease-out, opacity 0.4s ease-out !important;
+                transform: scale(0.5) !important;
+                opacity: 1 !important;
+            `;
+            document.body.appendChild(circle);
+            requestAnimationFrame(() => {
+                circle.style.transform = 'scale(2.5)';
+                circle.style.opacity = '0';
+            });
+            setTimeout(() => {
+                if (circle.parentNode) circle.parentNode.removeChild(circle);
+            }, 450);
+        } catch (e) {
+            console.error(e);
+        }
+    }
+    """
     try:
-        page.evaluate(f"window.showClickRipple && window.showClickRipple({x}, {y})")
+        page.evaluate(js_code, [x, y])
     except Exception:
         pass
 
 
-def visual_click(page, x: float, y: float):
-    """带红色涟漪特效的模拟点击"""
-    page.mouse.move(x, y, steps=12)
-    time.sleep(0.1)
-    trigger_ripple(page, x, y)
-    time.sleep(0.15)
-    page.mouse.down()
-    time.sleep(0.08)
-    page.mouse.up()
+def visual_click_locator(page, locator):
+    """
+    针对 Locator 对象的安全高亮点击：
+    1. 自动滚动元素至可视区域中心
+    2. 计算最新的绝对坐标
+    3. 播放红色涟漪特效并执行物理点击
+    """
+    try:
+        locator.scroll_into_view_if_needed(timeout=5000)
+        time.sleep(0.3)
+        box = locator.bounding_box()
+        if box:
+            x = box["x"] + box["width"] / 2
+            y = box["y"] + box["height"] / 2
+            page.mouse.move(x, y, steps=12)
+            time.sleep(0.1)
+            trigger_ripple(page, x, y)
+            time.sleep(0.2)
+            page.mouse.down()
+            time.sleep(0.08)
+            page.mouse.up()
+            time.sleep(0.2)
+            return True
+        else:
+            locator.click()
+            return True
+    except Exception as e:
+        print(f"  ⚠️ visual_click_locator 执行失败，尝试常规点击: {e}")
+        try:
+            locator.click()
+            return True
+        except Exception:
+            return False
 
 
 # ==================== 工具函数 ====================
@@ -150,13 +167,9 @@ def ensure_turnstile_passed(page, timeout=40) -> bool:
                 cb = iframe.locator("input[type='checkbox']")
 
                 if cb.count() > 0 and cb.first.is_visible(timeout=1000):
-                    box = cb.first.bounding_box()
-                    if box:
-                        click_x = box["x"] + box["width"] / 2
-                        click_y = box["y"] + box["height"] / 2
-                        print(f"  🎯 发现 Turnstile 复选框，触发红色涟漪点击: ({click_x:.1f}, {click_y:.1f})")
-                        visual_click(page, click_x, click_y)
-                        clicked = True
+                    print("  🎯 发现 Turnstile 复选框，尝试触发点击...")
+                    visual_click_locator(page, cb.first)
+                    clicked = True
             except Exception:
                 pass
 
@@ -168,9 +181,9 @@ def ensure_turnstile_passed(page, timeout=40) -> bool:
 
 # ==================== 智能定位与点击 Renew 按钮 ====================
 def locate_and_click_renew(page) -> bool:
-    """多策略寻找并点击 Renew 按钮（处理异步加载与 Confirm 弹窗）"""
+    """多策略寻找并点击 Renew 按钮（处理滚动视口与 Confirm 弹窗）"""
     print("🔍 正在检索 Renew 按钮...")
-    
+
     renew_selectors = [
         'button:has-text("Renew")',
         'a:has-text("Renew")',
@@ -196,7 +209,7 @@ def locate_and_click_renew(page) -> bool:
                     break
             except Exception:
                 pass
-        
+
         if renew_target:
             break
         time.sleep(1)
@@ -206,16 +219,11 @@ def locate_and_click_renew(page) -> bool:
         return False
 
     try:
-        box = renew_target.bounding_box()
-        if box:
-            print(f"  🎯 点击 Renew 按钮，坐标: ({box['x']:.1f}, {box['y']:.1f})")
-            visual_click(page, box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-        else:
-            renew_target.click()
-        
-        time.sleep(1.5)
+        print("  🎯 正在滚动到 Renew 按钮位置并触发带红圈点击...")
+        visual_click_locator(page, renew_target)
+        time.sleep(2.0)
 
-        # 检查二次确认 Modal
+        # 检查二次确认 Modal 弹窗
         confirm_selectors = [
             'div[role="dialog"] button:has-text("Confirm")',
             'div[role="dialog"] button:has-text("Yes")',
@@ -227,12 +235,8 @@ def locate_and_click_renew(page) -> bool:
             try:
                 c_btn = page.locator(c_sel).first
                 if c_btn.is_visible(timeout=1000):
-                    c_box = c_btn.bounding_box()
-                    print(f"  👆 触发 Modal 确认按钮点击: {c_sel}")
-                    if c_box:
-                        visual_click(page, c_box["x"] + c_box["width"] / 2, c_box["y"] + c_box["height"] / 2)
-                    else:
-                        c_btn.click()
+                    print(f"  👆 发现 Modal 确认弹窗按钮，触发点击: {c_sel}")
+                    visual_click_locator(page, c_btn)
                     break
             except Exception:
                 pass
@@ -250,8 +254,7 @@ def extract_service_info(page) -> str:
     try:
         card_locator = page.locator('*:has-text("Service information")').last
         if card_locator.is_visible(timeout=3000):
-            card_text = card_locator.inner_text()
-            return card_text
+            return card_locator.inner_text()
     except Exception:
         pass
     return body_text(page)
@@ -310,9 +313,6 @@ def main():
             locale="zh-CN",
             extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
         )
-        
-        # 🔑 【关键步骤】全局绑定涟漪函数：确保无论跳转/刷新到哪个页面，涟漪函数均有效
-        context.add_init_script(INIT_RIPPLE_JS)
 
         page = context.new_page()
 
@@ -325,16 +325,12 @@ def main():
         # 填写账号密码
         email_input = page.locator("#email")
         email_input.wait_for(state="visible", timeout=10000)
-        box_email = email_input.bounding_box()
-        if box_email:
-            visual_click(page, box_email["x"] + box_email["width"] / 2, box_email["y"] + box_email["height"] / 2)
+        visual_click_locator(page, email_input)
         email_input.fill(ACCOUNT_USER)
         time.sleep(0.3)
 
         password_input = page.locator("#password")
-        box_pass = password_input.bounding_box()
-        if box_pass:
-            visual_click(page, box_pass["x"] + box_pass["width"] / 2, box_pass["y"] + box_pass["height"] / 2)
+        visual_click_locator(page, password_input)
         password_input.fill(ACCOUNT_PASS)
         time.sleep(0.5)
 
@@ -356,11 +352,7 @@ def main():
 
         submit_btn = page.locator('button[type="submit"], input[type="submit"], button:has-text("Login"), button:has-text("Log in")').first
         if submit_btn.is_visible(timeout=3000):
-            box_submit = submit_btn.bounding_box()
-            if box_submit:
-                visual_click(page, box_submit["x"] + box_submit["width"] / 2, box_submit["y"] + box_submit["height"] / 2)
-            else:
-                submit_btn.click()
+            visual_click_locator(page, submit_btn)
         else:
             password_input.press("Enter")
 
@@ -376,11 +368,7 @@ def main():
         see_btn = page.locator('a:has-text("See"), button:has-text("See")').first
         see_btn.wait_for(state="visible", timeout=15000)
 
-        box_see = see_btn.bounding_box()
-        if box_see:
-            visual_click(page, box_see["x"] + box_see["width"] / 2, box_see["y"] + box_see["height"] / 2)
-        else:
-            see_btn.click()
+        visual_click_locator(page, see_btn)
 
         page.wait_for_load_state("domcontentloaded")
         page.wait_for_timeout(4000)
@@ -388,7 +376,7 @@ def main():
 
         # ---------------- 3. 点击 Renew 按钮 ----------------
         renew_clicked = locate_and_click_renew(page)
-        
+
         if renew_clicked:
             time.sleep(2.0)
             ensure_turnstile_passed(page, timeout=25)
@@ -412,6 +400,12 @@ def main():
         send_wechat(f"❌ Katabump 脚本运行异常\n\n错误信息: {e}\n⏰ {now}")
 
     finally:
+        # 🔑 【关键】增加 3 秒延迟，保证 Playwright 将最后一批渲染帧完整写入 WebM 文件
+        if page:
+            try:
+                page.wait_for_timeout(3000)
+            except Exception:
+                pass
         if context:
             try:
                 context.close()
