@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Katabump 自动登录与服务器续期监控脚本（Canvas 高亮与提示捕获完整版）
-- 使用 Canvas 全局图层绘制红色圆圈波纹特效（解决录屏与跨页点击不显示问题）
-- 精准定位 Renew 模态框触发按钮与确认按钮
-- 自动捕获未到续期时间提示 (.alert-danger) 并同步至企微通知
-- 精准提取 Service information 卡片详情（Expiry, Renew period, Price 等）
+Katabump 自动登录与服务器续期监控脚本（信息完整合并发送版）
+- Canvas 全局最顶层红色圆圈波纹高亮
+- 自动捕获 .alert-danger / .alert-warning 提示信息（如未到续期时间）
+- 显式等待并精准提取 Service information 的所有参数（Expiry, Renew period, Price 等）
+- 将续期状态、提示信息与服务器属性合并整合后发送至企业微信机器人
 """
 import os
 import re
@@ -48,7 +48,6 @@ window.drawClickRipple = function(x, y) {
         }
         const ctx = canvas.getContext('2d');
         let radius = 10;
-        let maxRadius = 35;
         let opacity = 1.0;
 
         function animate() {
@@ -185,10 +184,10 @@ def ensure_turnstile_passed(page, timeout=35) -> bool:
 
 
 # ==================== 定位与处理 Renew 逻辑 ====================
-def locate_and_click_renew(page) -> tuple[bool, str]:
+def locate_and_click_renew(page) -> tuple[bool, str, str]:
     """
     点击 Renew 按钮与模态框确认，并捕获警示信息
-    返回值: (是否成功执行点击, 续期提示或结果文本)
+    返回值: (是否触发点击, 续期状态简述, 警示/提示详细文本)
     """
     print("🔍 正在精准检索 Renew 按钮...")
 
@@ -218,20 +217,21 @@ def locate_and_click_renew(page) -> tuple[bool, str]:
 
     if not renew_target:
         print("  ⚠️ 未寻找到有效的 Renew 按钮")
-        return False, "ℹ️ 页面未发现 Renew 按钮"
+        return False, "未找到 Renew 按钮", ""
 
+    notice_msg = ""
     try:
         # 1. 点击 Renew 打开模态框
         visual_click_locator(page, renew_target)
         time.sleep(2.0)
         shot(page, "05_renew_modal_opened")
 
-        # 2. 检查页面或模态框内是否已有 alert 提示（例如未到续期时间）
-        alert_loc = page.locator('.alert.alert-danger, .alert-warning')
-        if alert_loc.count() > 0 and alert_loc.first.is_visible(timeout=1000):
-            alert_text = alert_loc.first.inner_text().strip()
-            print(f"  ⚠️ 捕获到续期限制提示: {alert_text}")
-            return True, f"⚠️ 无法续期：{alert_text}"
+        # 2. 检查页面或模态框内是否有警示提示框 (.alert)
+        alert_loc = page.locator('.alert.alert-danger, .alert-warning, .alert-info')
+        if alert_loc.count() > 0 and alert_loc.first.is_visible(timeout=1500):
+            notice_msg = alert_loc.first.inner_text().strip()
+            print(f"  ⚠️ 捕获到续期限制/警示提示: {notice_msg}")
+            return True, "暂不可续期", notice_msg
 
         # 3. 点击 Modal 弹窗内的提交确认按钮
         print("🔍 寻找 #renew-modal 内部确认提交按钮...")
@@ -254,71 +254,113 @@ def locate_and_click_renew(page) -> tuple[bool, str]:
 
         time.sleep(2.0)
 
-        # 4. 再次检查提交后是否有 alert 提示
-        if alert_loc.count() > 0 and alert_loc.first.is_visible(timeout=1000):
-            alert_text = alert_loc.first.inner_text().strip()
-            print(f"  ⚠️ 提交后捕获到提示: {alert_text}")
-            return True, f"⚠️ 续期提示：{alert_text}"
+        # 4. 再次检查提交后的警示框
+        if alert_loc.count() > 0 and alert_loc.first.is_visible(timeout=1500):
+            notice_msg = alert_loc.first.inner_text().strip()
+            print(f"  ⚠️ 提交后捕获到提示: {notice_msg}")
+            return True, "续期受到限制", notice_msg
 
-        return True, "✅ 续期请求已成功提交"
+        return True, "✅ 续期请求已提交", ""
 
     except Exception as e:
         print(f"  ❌ 点击 Renew 流程发生错误: {e}")
-        return False, f"❌ 续期执行异常: {e}"
+        return False, "续期执行异常", str(e)
 
 
-# ==================== 信息解析与格式化 ====================
-def extract_service_info(page) -> str:
-    """提取 Service information 卡片中的详细文本"""
+# ==================== 强力异步等待与 Service Info 抓取 ====================
+def extract_service_info(page) -> dict:
+    """
+    等待异步 Ajax 内容呈现后，解析并结构化提取 Service Information 数据
+    """
+    print("📋 开始抓取 Service Information 结构化数据...")
+
+    # 1. 显式等待核心属性关键字加载完毕（最多等待 8 秒）
+    for key_term in ["Expiry", "Renew period", "Auto renew", "Price"]:
+        try:
+            loc = page.locator(f'*:has-text("{key_term}")').first
+            loc.wait_for(state="visible", timeout=8000)
+            print(f"  ✅ Service Info 渲染完成，捕获到核心节点: [{key_term}]")
+            break
+        except Exception:
+            pass
+
+    # 2. 定位包含这些信息的最精准 DOM 区域
+    raw_text = ""
     try:
-        # 定位 Service information 卡片容器
-        card_locator = page.locator('*:has-text("Service information")').last
-        if card_locator.is_visible(timeout=3000):
-            text = card_locator.inner_text()
-            print("📋 抓取到的 Service Information 文本:\n" + text)
-            return text
-    except Exception:
-        pass
-    return body_text(page)
+        card_selectors = [
+            '.card:has-text("Service information")',
+            'div:has-text("Service information"):has-text("Expiry")',
+            'div:has-text("Renew period")',
+            'main'
+        ]
+        for sel in card_selectors:
+            card = page.locator(sel).last
+            if card.count() > 0 and card.is_visible():
+                t = card.inner_text().strip()
+                if "Expiry" in t or "Renew period" in t:
+                    raw_text = t
+                    print(f"  📋 获取到目标卡片文本:\n{raw_text}")
+                    break
+    except Exception as e:
+        print(f"⚠️ 卡片抓取异常: {e}")
+
+    if not raw_text:
+        raw_text = body_text(page)
+
+    # 3. 提取 Key-Value 对
+    info = {
+        "Renew period": "未知",
+        "Expiry": "未知",
+        "Auto renew": "未知",
+        "Price": "未知"
+    }
+
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+
+    for i, line in enumerate(lines):
+        for field in info.keys():
+            if field.lower() in line.lower():
+                # 判断属性对应的值是在同一行 (如 "Expiry: 2026-10-12") 还是下一行
+                if ":" in line:
+                    parts = line.split(":", 1)
+                    if len(parts) > 1 and parts[1].strip():
+                        info[field] = parts[1].strip()
+                elif i + 1 < len(lines):
+                    next_line = lines[i+1]
+                    # 确保下一行不是另一个 key 属性名
+                    if not any(k.lower() in next_line.lower() for k in info.keys()):
+                        info[field] = next_line
+
+    print(f"📊 结构化提取结果: {info}")
+    return info
 
 
-def format_wechat_msg(raw_info: str, renew_status: str, now: str) -> str:
-    """整理格式并拼装企微通知文本"""
+def format_wechat_msg(notice_msg: str, renew_status: str, service_data: dict, now: str) -> str:
+    """组合警示文本与服务器属性，生成完整格式的企业微信推送"""
     msg_lines = [
         "━━━━━━━━━━━━━━━━━━━━",
         "🤖 Katabump 服务器自动续期通知",
-        f"📊 续期结果：{renew_status}",
-        "━━━━━━━━━━━━━━━━━━━━",
-        "🖥️ 【Service Information 详细信息】"
+        f"📊 续期操作结果：{renew_status}"
     ]
 
-    # 按行切割并过滤空行
-    lines = [line.strip() for line in raw_info.splitlines() if line.strip()]
-    
-    # 提取常见关键属性
-    info_map = {}
-    key_terms = ["Renew period", "Expiry", "Auto renew", "Price", "Status", "Server Status"]
-    
-    for i, line in enumerate(lines):
-        for term in key_terms:
-            if term.lower() in line.lower():
-                # 如果下一行是对应的数值
-                val = lines[i+1] if (i + 1 < len(lines) and ":" not in lines[i+1]) else ""
-                info_map[term] = val if val else line
-
-    if info_map:
-        for k, v in info_map.items():
-            msg_lines.append(f"• {k}: {v}")
-    else:
-        # 降级备用：展示前 12 行有用数据
-        for line in lines[:12]:
-            if "Service information" not in line:
-                msg_lines.append(f"• {line}")
+    # 如果有警告/提示信息（如：未到续期时间提示），显示在醒目位置
+    if notice_msg:
+        msg_lines.extend([
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"⚠️ 提示/报错信息：\n{notice_msg}"
+        ])
 
     msg_lines.extend([
         "━━━━━━━━━━━━━━━━━━━━",
+        "🖥️ 【Service Information 详细信息】",
+        f"• Renew period: {service_data.get('Renew period', '未知')}",
+        f"• Expiry: {service_data.get('Expiry', '未知')}",
+        f"• Auto renew: {service_data.get('Auto renew', '未知')}",
+        f"• Price: {service_data.get('Price', '未知')}",
+        "━━━━━━━━━━━━━━━━━━━━",
         f"⏰ 执行时间：{now}"
     ])
+
     return "\n".join(msg_lines)
 
 
@@ -356,7 +398,7 @@ def main():
             extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
         )
 
-        # 🔑 全局注册 Canvas 动画绘制脚本
+        # 全局注册 Canvas 点击高亮特效
         context.add_init_script(INIT_CANVAS_RIPPLE_JS)
 
         page = context.new_page()
@@ -416,11 +458,11 @@ def main():
         visual_click_locator(page, see_btn)
 
         page.wait_for_load_state("domcontentloaded")
-        page.wait_for_timeout(5000)
+        page.wait_for_timeout(4000)
         shot(page, "04_server_detail_page")
 
         # ---------------- 3. 点击 Renew 按钮并捕获提示 ----------------
-        renew_clicked, renew_status = locate_and_click_renew(page)
+        renew_clicked, renew_status, notice_msg = locate_and_click_renew(page)
 
         if renew_clicked:
             time.sleep(2.0)
@@ -428,11 +470,11 @@ def main():
             page.wait_for_timeout(3000)
             shot(page, "06_after_renew_result")
 
-        # ---------------- 4. 抓取卡片信息并发送通知 ----------------
-        print("📋 读取 Service information 信息...")
-        service_info = extract_service_info(page)
+        # ---------------- 4. 抓取 Service Info 并合并发送通知 ----------------
+        service_data = extract_service_info(page)
 
-        wechat_msg = format_wechat_msg(service_info, renew_status, now)
+        wechat_msg = format_wechat_msg(notice_msg, renew_status, service_data, now)
+        print("📤 即将发送合并后的完整推送文本:\n" + wechat_msg)
         send_wechat(wechat_msg)
         print("✅ 监控全流程顺利完成！")
 
