@@ -1,207 +1,215 @@
-# 🖥️ Lunafy Server Auto-Renewal
+# 🖥️ Katabump Turnstile 自动化登录与续期监控
 
-[![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-2088FF?logo=github-actions&logoColor=white)](https://github.com/features/actions)
-[![SeleniumBase](https://img.shields.io/badge/SeleniumBase-UC%20Mode-success?logo=selenium)](https://seleniumbase.io/)
-[![Python 3.11](https://img.shields.io/badge/Python-3.11-blue?logo=python)](https://www.python.org/)
+本项目基于 Python 与 [CloakBrowser](https://github.com/CloakHQ/cloakbrowser)（基于 Playwright 的反检测浏览器）开发，实现了自动化登录 **Katabump Dashboard** (`dashboard.katabump.com`)、自动绕过 Cloudflare Turnstile 人机验证、进入服务器详情页并触发续期（Renew）。
 
-> 🤖 **全自动监控 + 续期** Lunafy 免费服务器，基于 SeleniumBase UC Mode 自动处理 Cloudflare Turnstile 人机验证，配合企业微信机器人实时推送状态。
+执行结果、警示信息以及服务器详细信息会集中整合，自动推送至企业微信机器人，并支持通过 GitHub Actions 进行每日定时调度与自动执行。
 
 ---
 
-## ✨ 功能特性
+## ✨ 核心特性
 
-| 功能 | 状态 | 说明 |
-|------|:----:|------|
-| 🔐 **Cookie 自动登录** | ✅ | 注入 Cookie 绕过手动登录流程 |
-| 🛡️ **Turnstile 自动过盾** | ✅ | 基于 SeleniumBase `uc_gui_click_captcha()` 模拟人类轨迹点击 |
-| 🔄 **Renew 自动续期** | ✅ | 检测过期状态 → 点击 Renew → 完成验证 → 刷新确认 |
-| 📱 **企业微信实时通知** | ✅ | 成功 / 失败 / Cookie 失效 全场景覆盖 |
-| 🌐 **GOST 代理隧道** | ✅ | 流量走代理出口，降低 IP 风控概率 |
-| 📷 **自动截图存档** | ✅ | 每步操作保留截图至 Artifacts，方便排查 |
+- 🛡️ **Cloudflare Turnstile 自动绕过**：结合 CloakBrowser 的反指纹能力与严格的 Token 注入检测，高成功率完成 Turnstile 人机验证。
+- 🎯 **精准 UI 定位与弹窗处理**：自动适配 Filament / Laravel 框架的后台页面，精确定位 `#renew-modal` 模态框并自动点击提交。
+- ⚠️ **动态警示信息捕抓**：自动捕获并提取未到续期时间时的提示信息（例如：`You can't renew your server yet...`）。
+- 📊 **结构化数据提取**：自动读取并解析 `Service information` 卡片内容（包括 **Renew period**、**Expiry**、**Auto renew**、**Price**）。
+- 🎨 **视觉化调试与录屏**：
+  - 支持 Canvas 最顶层红色波纹点击高亮特效，便于精准跟踪模拟点击轨迹。
+  - 自动生成 WebM 操作录像与关键节点截图（以 GitHub Actions Artifacts 形式保存）。
+- 🌐 **代理弹性降级**：支持 GOST SOCKS5 代理隧道；若代理连接失败，自动无缝降级为网络直连模式运行。
+- ⏰ **北京时间自动对齐**：通知中的执行时间统一对齐为 **北京时间（UTC+8）**。
 
 ---
 
-## 📁 项目结构
+## 📁 目录结构
 
-```
+```text
 .
+├── renew-auto.py               # 主 Python 自动续期脚本
 ├── .github/
 │   └── workflows/
-│       └── lunafy-monitor.yml    # GitHub Actions 工作流
-├── monitor.py                     # 核心监控续期脚本
-└── README.md                      # 本文件
+│       └── renew.yml          # GitHub Actions 工作流配置文件
+├── screenshots/               # 调试截图输出目录
+├── videos/                    # 操作录屏 (.webm) 输出目录
+└── README.md                  # 项目说明文档
 ```
 
 ---
 
-## 🔐 环境变量配置
+## 🛠️ 本地运行指南
 
-在仓库 **Settings → Secrets and variables → Actions → New repository secret** 中添加以下 Secrets：
+### 1. 基础环境准备
+需要 Python 3.10+ 环境（建议使用 Python 3.12）。
 
-| Secret 名称 | 必填 | 格式示例 | 说明 |
-|------------|:----:|----------|------|
-| `GOST_PROXY` | ✅ | `socks5://user:pass@host:port` | GOST 上游代理地址，用于隧道转发 |
-| `WECHAT_WEBHOOK_KEY` | ✅ | `693a91f6-7xxx-4bc4-97a0-0ec2sfs60f` | 企业微信机器人 Key |
-| `LUNAFY_COOKIES` | ✅ | JSON 数组（见下方） | Cookie Editor 导出的登录态 Cookie |
+```bash
+# 1. 克隆仓库
+git clone <your-repository-url>
+cd <repository-folder>
 
-### 🍪 LUNAFY_COOKIES 格式
+# 2. 安装 Python 依赖
+pip install cloakbrowser requests
 
-在浏览器中安装 [Cookie-Editor](https://cookie-editor.com/) 扩展，登录 `https://panel.lunafy.run/login` 后导出 Cookies，整理为以下 JSON 格式填入 Secret：
-
-```json
-[
-  {
-    "name": "__alt_fp",
-    "value": "你的值",
-    "httpOnly": false
-  },
-  {
-    "name": "pelican_session",
-    "value": "你的值",
-    "httpOnly": true
-  },
-  {
-    "name": "remember_web_59ba36addc2b2f9401580f014c7f58ea4e30989d",
-    "value": "你的值",
-    "httpOnly": true
-  },
-  {
-    "name": "XSRF-TOKEN",
-    "value": "你的值",
-    "httpOnly": false
-  }
-]
+# 3. 安装 CloakBrowser 二进制及 Playwright 依赖
+python -m cloakbrowser install
+python -m playwright install ffmpeg
 ```
 
-> ⚠️ `remember_web_` 后面的哈希值每个人不同，请直接从你的 Cookie Editor 中复制完整名称。
+### 2. 设置环境变量
+
+在使用脚本前，请配置以下环境变量：
+
+| 环境变量名 | 必填 | 默认值 | 描述 |
+| :--- | :---: | :---: | :--- |
+| `KATABUMP_USER` | **是** | - | Katabump 账号邮箱 |
+| `KATABUMP_PASS` | **是** | - | Katabump 账号密码 |
+| `WECHAT_WEBHOOK_KEY` | 否 | `""` | 企业微信机器人的 Webhook Key |
+| `PROXY_SERVER` | 否 | `socks5://127.0.0.1:40000` | SOCKS5/HTTP 代理服务地址（置空则直连） |
+| `HEADLESS` | 否 | `false` | 是否开启无头模式（建议使用 `false` 配合 xvfb 运行） |
+| `CLOAKBROWSER_LICENSE_KEY` | 否 | `""` | CloakBrowser 授权密钥（可选） |
+
+### 3. 运行脚本
+
+```bash
+# Linux 环境下建议通过 xvfb 虚拟显示运行
+xvfb-run -a --server-args="-screen 0 1920x1080x24" python renew-auto.py
+```
 
 ---
 
-## 🚀 快速部署
+## 🚀 GitHub Actions 自动化部署
 
-### 1️⃣ Fork / 创建仓库
+仓库已包含 `.github/workflows/renew.yml`，支持每日自动运行与手动触发。
 
-将本项目的 `monitor.py` 和 `.github/workflows/lunafy-monitor.yml` 放入你的 GitHub 仓库。
+### 1. 配置 GitHub Secrets
 
-### 2️⃣ 配置 Secrets
+进入 GitHub 仓库：**Settings** -> **Secrets and variables** -> **Actions** -> **New repository secret**，添加以下配置：
 
-按照上方表格配置 `GOST_PROXY`、`WECHAT_WEBHOOK_KEY`、`LUNAFY_COOKIES`。
+- `KATABUMP_USER`: 你的 Katabump 账号邮箱
+- `KATABUMP_PASS`: 你的 Katabump 账号密码
+- `WECHAT_WEBHOOK_KEY`: 企业微信机器人的 Webhook Key
+- `GOST_PROXY` *(可选)*: GOST 代理节点地址（例：`relay+tls://user:pass@example.com:8443`）
+- `CLOAKBROWSER_LICENSE_KEY` *(可选)*: CloakBrowser 许可证
 
-### 3️⃣ 手动触发测试
-
-进入 **Actions → Lunafy Turnstile 自动续期 → Run workflow**，观察首次运行结果。
-
-### 4️⃣ 查看通知
-
-运行结束后，检查企业微信机器人是否收到状态推送。
-
----
-
-## ⏰ 定时策略
-
-默认每 **2 小时** 自动运行一次：
+### 2. 工作流运行配置 (`renew.yml`)
 
 ```yaml
+name: 🖥️ katabump Turnstile 自动续期（CloakBrowser）
+
 on:
   schedule:
-    - cron: '0 */2 * * *'   # 每 2 小时
-  workflow_dispatch:         # 支持手动触发
-```
+    - cron: '0 2 * * *'  # 每天 UTC 02:00 (北京时间 10:00) 执行
+  workflow_dispatch:
 
-如需调整频率，修改 `.github/workflows/lunafy-monitor.yml` 中的 `cron` 表达式即可。
+env:
+  TZ: Asia/Shanghai      # 全局配置为北京时间时区
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 📦 安装系统依赖（xvfb + 中文字体 + Chromium 运行库）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-wqy-zenhei fonts-wqy-microhei
+          sudo apt-get install -y xvfb libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
+            libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 \
+            libgbm1 libasound2t64 libpango-1.0-0 libcairo2 libatspi2.0-0
+
+      - name: 📦 安装 Python 依赖 + 预下载 CloakBrowser 二进制
+        run: |
+          pip install cloakbrowser requests
+          python -m cloakbrowser install
+          python -m playwright install ffmpeg
+
+      - name: 🌐 启动 GOST 代理隧道（支持失败自动降级直连）
+        id: proxy_setup
+        env:
+          GOST_PROXY: ${{ secrets.GOST_PROXY }}
+        run: |
+          USE_PROXY="false"
+          if [ -n "${GOST_PROXY}" ]; then
+            echo "🔍 检测到 GOST_PROXY 配置，尝试启动隧道..."
+            GOST_VERSION=$(curl -s [https://api.github.com/repos/go-gost/gost/releases/latest](https://api.github.com/repos/go-gost/gost/releases/latest) | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
+            echo "📦 GOST 版本: $GOST_VERSION"
+            wget -q "[https://github.com/go-gost/gost/releases/download/v$](https://github.com/go-gost/gost/releases/download/v$){GOST_VERSION}/gost_${GOST_VERSION}_linux_amd64.tar.gz"
+            tar -xzf gost_${GOST_VERSION}_linux_amd64.tar.gz
+            chmod +x ./gost
+            nohup ./gost -L socks5://127.0.0.1:40000 -F "${GOST_PROXY}" > gost.log 2>&1 &
+            sleep 6
+            
+            EXIT_IP=$(curl -s --max-time 6 --proxy socks5://127.0.0.1:40000 [https://api.ipify.org](https://api.ipify.org) || true)
+            if [ -n "${EXIT_IP}" ]; then
+              echo "✅ 代理节点连通成功，出口 IP: ${EXIT_IP}"
+              USE_PROXY="true"
+            else
+              echo "⚠️ GOST 代理隧道连接失败，自动降级为【直连模式】..."
+            fi
+          else
+            echo "ℹ️ 未配置 GOST_PROXY，直接使用【直连模式】"
+          fi
+
+          if [ "$USE_PROXY" = "true" ]; then
+            echo "PROXY_SERVER=socks5://127.0.0.1:40000" >> $GITHUB_ENV
+          else
+            echo "PROXY_SERVER=" >> $GITHUB_ENV
+          fi
+
+      - name: 🔍 运行 katabump 监控续期脚本（xvfb + headed 模式）
+        env:
+          KATABUMP_USER: ${{ secrets.KATABUMP_USER }}
+          KATABUMP_PASS: ${{ secrets.KATABUMP_PASS }}
+          WECHAT_WEBHOOK_KEY: ${{ secrets.WECHAT_WEBHOOK_KEY }}
+          CLOAKBROWSER_LICENSE_KEY: ${{ secrets.CLOAKBROWSER_LICENSE_KEY }}
+          HEADLESS: "false"
+        run: |
+          echo "⏰ 当前运行时间（北京时间）：$(date)"
+          echo "🌐 代理配置状态: ${PROXY_SERVER:-直连}"
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" python renew-auto.py
+
+      - name: 📷 上传调试截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: katabump-screenshots-${{ github.run_id }}
+          path: "screenshots/*.png"
+          retention-days: 5
+
+      - name: 🎬 上传操作录屏
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: katabump-video-${{ github.run_id }}
+          path: "videos/*.webm"
+          retention-days: 7
+```
 
 ---
 
-## 📱 企业微信通知示例
+## 📬 推送示例（企业微信）
 
-### ✅ 续期成功
+工作流运行完成后，企业微信机器人将收到如下格式的消息通知：
+
+```text
+━━━━━━━━━━━━━━━━━━━━
+🤖 Katabump 服务器自动续期通知
+📊 续期操作结果：⚠️ 续期受限/未到时间
+━━━━━━━━━━━━━━━━━━━━
+⚠️ 提示信息：
+You can't renew your server yet. You will be able to as of 11 October (in 2 day(s)).
+━━━━━━━━━━━━━━━━━━━━
+🖥️ 【Service Information 详细信息】
+• Renew period: Every 4 days
+• Expiry: 2026-10-12
+• Auto renew: Non
+• Price: 0 crédits
+━━━━━━━━━━━━━━━━━━━━
+⏰ 执行时间（北京时间）：2026-10-09 21:27:38
 ```
-🎉 Lunafy 续期成功！
-
-📊 服务器状态：✅ 正常运行 (Active)
-📝 详情：续期完成，服务器已恢复
-🖥️ 服务器数量：1
-
-✅ Turnstile 人机验证已通过
-⏰ 检测时间：2026-08-25 22:17:00
-🤖 GitHub Actions + SeleniumBase UC Mode
-```
-
-### ❌ Cookie 失效
-```
-🔐 Lunafy Cookie 已失效
-
-登录状态过期，已被重定向到登录页。
-👉 请重新登录 https://panel.lunafy.run/login 并更新 Secrets 中的 LUNAFY_COOKIES
-
-⏰ 2026-08-25 22:17:00
-```
-
-### ⚠️ Turnstile 验证失败（降级通知）
-```
-❌ Lunafy 续期失败
-
-📊 服务器状态：❌ 已过期 (Expired)
-📝 详情：服务器已被删除，需续期重建
-⏰ 删除时间：24/08 11:53
-
-🛑 Turnstile 自动验证未成功。
-👉 请手动处理：https://panel.lunafy.run/
-1. 点击 Renew 按钮
-2. 勾选「Verify you are human」
-
-⏰ 2026-08-25 22:17:00
-```
-
----
-
-## 🛠️ 技术栈
-
-- **SeleniumBase** — UC Mode 反检测浏览器自动化
-- **GOST** — 安全代理隧道
-- **GitHub Actions** — CI/CD 定时任务
-- **企业微信机器人** — 实时消息推送
-- **xvfb** — 虚拟 X11 显示服务器（供 headed 浏览器渲染）
-
----
-
-## ⚠️ 注意事项
-
-1. **Cookie 有效期**：`pelican_session` 和 `remember_web_xxx` 有过期时间，失效后需重新从浏览器复制更新。
-2. **IP 风控**：GitHub Actions 的数据中心 IP 可能被 Cloudflare 标记，即使使用 UC Mode + 代理也无法 100% 保证通过 Turnstile。脚本已做好**失败降级**，会立即通知你手动处理。
-3. **截图调试**：无论成功失败，Actions 都会上传页面截图到 Artifacts，保留 5 天，方便排查问题。
-4. **频率限制**：请勿将 cron 设置得过于频繁（如每分钟），避免对 Lunafy 服务器造成压力或触发封禁。
-
----
-
-## 📷 调试截图说明
-
-每次运行会自动保存以下截图到 Artifacts：
-
-| 文件名 | 说明 |
-|--------|------|
-| `01_dashboard.png` | 注入 Cookie 后访问 Dashboard 的首屏 |
-| `02_renew_clicked.png` | 点击 Renew 按钮后的状态 |
-| `03_popup_visible.png` | Security Check 弹窗出现后的画面 |
-| `04_after_turnstile.png` | Turnstile 验证尝试后的画面 |
-| `05_final_status.png` | 刷新页面后的最终状态 |
-
----
-
-## 📜 免责声明
-
-本项目仅供学习和技术交流使用。使用者需自行承担因使用本脚本而产生的一切后果，包括但不限于：
-
-- 账号因自动化操作被平台封禁
-- Cookie 泄露导致的安全风险
-- 服务器数据丢失或服务中断
-
-**请遵守 Lunafy 平台的使用条款，合理使用免费资源。**
-
----
-
-<div align="center">
-
-Made with ❤️ by GitHub Actions + SeleniumBase
-
-</div>
