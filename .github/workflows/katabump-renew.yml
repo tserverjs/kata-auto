@@ -1,9 +1,12 @@
-name: 🖥️ katabump Turnstile 自动续期（CloakBrowser）
+name: 🖥️ Katabump Turnstile 自动续期（CloakBrowser）
 
 on:
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '0 2 * * *'  # 每天 UTC 02:00 (北京时间 10:00) 执行
   workflow_dispatch:
+
+env:
+  TZ: Asia/Shanghai      # 🔑 1. 全局配置为北京时间时区
 
 jobs:
   monitor:
@@ -18,7 +21,7 @@ jobs:
         with:
           python-version: '3.12'   # 避免 3.13+ 的 sync API 兼容问题
 
-      - name: 📦 安装系统依赖（xvfb + Chromium 运行库）
+      - name: 📦 安装系统依赖（xvfb + 中文字体 + Chromium 运行库）
         run: |
           sudo apt-get update
           sudo apt-get install -y fonts-wqy-zenhei fonts-wqy-microhei
@@ -32,30 +35,43 @@ jobs:
           python -m cloakbrowser install
           python -m playwright install ffmpeg
 
-      - name: 🌐 启动 GOST 代理隧道
+      - name: 🌐 启动 GOST 代理隧道（支持失败自动降级直连）
+        id: proxy_setup
         env:
           GOST_PROXY: ${{ secrets.GOST_PROXY }}
         run: |
-          if [ -z "${GOST_PROXY}" ]; then
-            echo "❌ 未配置 GOST_PROXY"
-            exit 1
+          # 🔑 2. GOST 代理连接逻辑与降级策略
+          USE_PROXY="false"
+          if [ -n "${GOST_PROXY}" ]; then
+            echo "🔍 检测到 GOST_PROXY 配置，尝试启动隧道..."
+            GOST_VERSION=$(curl -s https://api.github.com/repos/go-gost/gost/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
+            echo "📦 GOST 版本: $GOST_VERSION"
+            wget -q "https://github.com/go-gost/gost/releases/download/v${GOST_VERSION}/gost_${GOST_VERSION}_linux_amd64.tar.gz"
+            tar -xzf gost_${GOST_VERSION}_linux_amd64.tar.gz
+            chmod +x ./gost
+            nohup ./gost -L socks5://127.0.0.1:40000 -F "${GOST_PROXY}" > gost.log 2>&1 &
+            sleep 6
+            
+            EXIT_IP=$(curl -s --max-time 6 --proxy socks5://127.0.0.1:40000 https://api.ipify.org || true)
+            if [ -n "${EXIT_IP}" ]; then
+              echo "✅ 代理节点连通成功，出口 IP: ${EXIT_IP}"
+              USE_PROXY="true"
+            else
+              echo "⚠️ GOST 代理隧道连接失败，查看日志如下："
+              cat gost.log || true
+              echo "🔄 自动降级为【直连模式】继续运行..."
+            fi
+          else
+            echo "ℹ️ 未配置 GOST_PROXY，直接使用【直连模式】"
           fi
-          GOST_VERSION=$(curl -s https://api.github.com/repos/go-gost/gost/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
-          echo "📦 GOST 版本: $GOST_VERSION"
-          wget -q "https://github.com/go-gost/gost/releases/download/v${GOST_VERSION}/gost_${GOST_VERSION}_linux_amd64.tar.gz"
-          tar -xzf gost_${GOST_VERSION}_linux_amd64.tar.gz
-          chmod +x ./gost
-          nohup ./gost -L socks5://:40000 -F "${GOST_PROXY}" > gost.log 2>&1 &
-          sleep 6
-          EXIT_IP=$(curl -s --max-time 6 --proxy socks5://127.0.0.1:40000 https://api.ipify.org || true)
-          if [ -z "${EXIT_IP}" ]; then
-            echo "❌ 代理隧道连接失败"
-            cat gost.log
-            exit 1
-          fi
-          echo "✅ 代理就绪，出口 IP: ${EXIT_IP}"
 
-      - name: 🔍 运行 katabump 监控续期脚本（xvfb + headed 模式）
+          if [ "$USE_PROXY" = "true" ]; then
+            echo "PROXY_SERVER=socks5://127.0.0.1:40000" >> $GITHUB_ENV
+          else
+            echo "PROXY_SERVER=" >> $GITHUB_ENV
+          fi
+
+      - name: 🔍 运行 Katabump 监控续期脚本（xvfb + headed 模式）
         env:
           KATABUMP_USER: ${{ secrets.KATABUMP_USER }}
           KATABUMP_PASS: ${{ secrets.KATABUMP_PASS }}
@@ -63,6 +79,8 @@ jobs:
           CLOAKBROWSER_LICENSE_KEY: ${{ secrets.CLOAKBROWSER_LICENSE_KEY }}  # 可选
           HEADLESS: "false"     # headed 模式 Turnstile 通过率最高，由 xvfb 提供虚拟显示
         run: |
+          echo "⏰ 当前运行时间（北京时间）：$(date)"
+          echo "🌐 代理配置状态: ${PROXY_SERVER:-直连}"
           xvfb-run -a --server-args="-screen 0 1920x1080x24" python renew-auto.py
 
       - name: 📷 上传调试截图
